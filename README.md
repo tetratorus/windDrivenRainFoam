@@ -7,7 +7,9 @@ An open-source solver for wind-driven rain based on OpenFOAM
 The solver is tested for the following OpenFOAM versions:
 
 * OpenFOAM-org (OpenFOAM Foundation) v6, v7, v8, v9, v10, v11, v12, v13
-* OpenFOAM-com (OpenCFD-ESI) v1806, v2006, v2106
+* OpenFOAM-com (OpenCFD-ESI) v1806, v2006, v2106, v2606
+
+For HPC use, `hpc/` builds a sealed Apptainer image (OpenFOAM v2606 + this solver) and runs it on Slurm across nodes; see [docs/OPERATOR_GUIDE.md](docs/OPERATOR_GUIDE.md) and [docs/TRANSLATION_REPORT.md](docs/TRANSLATION_REPORT.md).
 
 ### Usage
 

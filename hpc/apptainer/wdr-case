@@ -1,0 +1,49 @@
+#!/bin/bash
+# Case workflow steps for cubicBuilding-style windDrivenRainFoam cases, run inside the image.
+# A case directory holds two sub-cases: <name>.simpleFoam (wind flow) and <name>.windDrivenRainFoam (rain).
+# Serial steps run here; the parallel solves are launched by the scheduler:
+#   srun apptainer exec wdr.sif simpleFoam -parallel        (in the wind case)
+#   srun apptainer exec wdr.sif windDrivenRainFoam -parallel (in the rain case)
+set -euo pipefail
+. /.singularity.d/env/90-openfoam.sh 2>/dev/null || true
+
+die() { echo "wdr-case: $*" >&2; exit 1; }
+# OpenFOAM can return 0 after printing a FATAL error in a few utilities; treat that as failure too.
+run() { local log=$1; shift; echo "+ $* > $log"; if ! "$@" > "$log" 2>&1 || grep -q "FOAM FATAL" "$log"; then tail -40 "$log" >&2; die "$1 failed (see $log)"; fi; }
+subcase() { local d; d=$(ls -d "$1"/*."$2" 2>/dev/null | head -1); [ -n "$d" ] || die "no *.$2 sub-case in $1"; echo "$d"; }
+set_np() {  # numberOfSubdomains NP, simple decomposition (2 1 NP/2), same as the upstream reference run
+  local np=$1 d=$2/system/decomposeParDict
+  [ $((np % 2)) -eq 0 ] || [ "$np" -eq 1 ] || die "NP must be 1 or even"
+  local n="(2 1 $((np/2)))"; [ "$np" -eq 1 ] && n="(1 1 1)"
+  foamDictionary -entry numberOfSubdomains -set "$np" "$d" >/dev/null
+  foamDictionary -entry method -set simple "$d" >/dev/null
+  foamDictionary -entry simpleCoeffs/n -set "$n" "$d" >/dev/null
+}
+
+cmd=${1:-help}; shift || true
+case "$cmd" in
+  init-tutorial)  # copy the bundled cubicBuilding tutorial to DIR
+    dest=${1:?usage: init-tutorial DIR}; mkdir -p "$dest"; cp -r /opt/wdr/tutorials/cubicBuilding/. "$dest/" ;;
+  wind-pre)       # DIR NP : mesh + decompose the wind case
+    w=$(subcase "${1:?DIR}" simpleFoam); np=${2:?NP}; cd "$w"
+    run log.blockMesh blockMesh
+    set_np "$np" .; run log.decomposePar decomposePar -force ;;
+  wind-post)      # DIR : reconstruct latest wind time
+    w=$(subcase "${1:?DIR}" simpleFoam); cd "$w"; run log.reconstructPar reconstructPar -latestTime ;;
+  rain-pre)       # DIR NP : map mesh + latest wind fields into the rain case, decompose
+    d=${1:?DIR}; np=${2:?NP}; w=$(subcase "$d" simpleFoam); r=$(subcase "$d" windDrivenRainFoam); cd "$r"
+    rm -rf constant/polyMesh; cp -r "$w/constant/polyMesh" constant/
+    t=$(foamListTimes -latestTime -case "$w" | tail -1); [ -n "$t" ] && [ "$t" != 0 ] || die "wind case has no solution"
+    for f in U k epsilon nut; do
+      if [ -e "$w/$t/$f.gz" ]; then rm -f "0/$f" "0/$f.gz"; cp "$w/$t/$f.gz" 0/; else rm -f "0/$f" "0/$f.gz"; cp "$w/$t/$f" 0/; fi
+    done
+    echo "wind fields taken from time $t"
+    run log.changeDictionary changeDictionary
+    set_np "$np" .; run log.decomposePar decomposePar -force ;;
+  rain-post)      # DIR : reconstruct latest rain time
+    r=$(subcase "${1:?DIR}" windDrivenRainFoam); cd "$r"; run log.reconstructPar reconstructPar -latestTime ;;
+  check-log)      # LOG : solver log must end cleanly
+    l=${1:?LOG}; ! grep -q "FOAM FATAL" "$l" || die "fatal error in $l"; grep -q "^End" "$l" || die "$l did not reach End" ;;
+  version) cat /opt/wdr/VERSION; echo "openfoam=$WM_PROJECT_VERSION" ;;
+  help|*) sed -n '2,6p' "$0"; echo "steps: init-tutorial DIR | wind-pre DIR NP | wind-post DIR | rain-pre DIR NP | rain-post DIR | check-log LOG | version" ;;
+esac

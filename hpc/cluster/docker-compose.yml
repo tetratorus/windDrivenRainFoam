@@ -1,0 +1,47 @@
+# Local stand-in for the proposed AWS prototype environment:
+#   head  = Slurm controller + login node (operator CLI runs here)
+#   c1,c2 = Slurm compute nodes with Apptainer (4 cores each)
+#   s3    = S3-compatible object storage (SeaweedFS) for cases, results and the versioned image
+# /shared is the cluster shared filesystem (FSx for Lustre / EFS on AWS).
+x-node: &node
+  image: ura-wdr/slurm-node:local
+  build: .
+  privileged: true
+  volumes:
+    - ${SHARED_DIR:-./state/shared}:/shared
+    - ${STATE_DIR:-./state}/munge:/etc/munge-shared:ro
+    - ../operator:/opt/wdr-operator:ro
+    - ../slurm:/opt/wdr-slurm:ro
+  networks: [hpc]
+  environment:
+    AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:-wdradmin}
+    AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:-wdradmin-secret}
+    S3_ENDPOINT: http://s3:8333
+    WDR_SBATCH: /opt/wdr-slurm/wdr.sbatch
+services:
+  s3:
+    image: chrislusf/seaweedfs:3.80
+    command: server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=1024 -volume.max=50 -dir=/data
+    volumes:
+      - ${STATE_DIR:-./state}/s3:/data
+      - ./s3.json:/etc/seaweedfs/s3.json:ro
+    networks: [hpc]
+    ports: ["127.0.0.1:8333:8333"]
+  head:
+    <<: *node
+    hostname: head
+    command: head
+  c1:
+    <<: *node
+    hostname: c1
+    command: compute
+    init: true  # keep PID 1 outside the slurmstepd scope; Slurm derives its cgroup root from /proc/1/cgroup
+    depends_on: [head]
+  c2:
+    <<: *node
+    hostname: c2
+    command: compute
+    init: true  # keep PID 1 outside the slurmstepd scope; Slurm derives its cgroup root from /proc/1/cgroup
+    depends_on: [head]
+networks:
+  hpc: {}
