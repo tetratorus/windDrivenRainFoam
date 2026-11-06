@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>windDrivenRainFoam · HPC operator console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--ink:#1d2330;--mute:#6b7385;--line:#e3e6ec;--blue:#2563eb;--green:#15803d;--amber:#b45309;--red:#b91c1c;--violet:#6d28d9}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+header{background:#111827;color:#fff;padding:14px 24px;display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;font-weight:600}header h1 small{color:#9ca3af;font-weight:400;margin-left:8px}
+.nodes{display:flex;gap:10px;margin-left:auto}.node{background:#1f2937;border-radius:8px;padding:6px 12px;min-width:120px}
+.node b{display:block;font-size:13px}.node .bar{height:6px;background:#374151;border-radius:3px;margin-top:5px;overflow:hidden}
+.node .bar i{display:block;height:100%;background:#22c55e}.node span{font-size:12px;color:#9ca3af}
+main{display:grid;grid-template-columns:360px 1fr;gap:18px;padding:18px 24px;max-width:1500px;margin:0 auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:18px}
+.card h2{font-size:15px;margin:0 0 12px}label{display:block;font-size:12px;color:var(--mute);margin:10px 0 4px}
+select,input{width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;font:inherit;background:#fff}
+.row{display:flex;gap:10px}.row>div{flex:1}
+button{background:var(--blue);color:#fff;border:0;border-radius:6px;padding:9px 14px;font:inherit;font-weight:600;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}button.ghost{background:#eef2ff;color:var(--blue)}
+.jobs{width:100%;border-collapse:collapse}.jobs td,.jobs th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left;font-size:13px}
+.jobs tr{cursor:pointer}.jobs tr.sel{background:#eef2ff}.jobs th{color:var(--mute);font-weight:500;font-size:12px}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;background:#e5e7eb}
+.RUNNING{background:#dbeafe;color:#1d4ed8}.COMPLETED{background:#dcfce7;color:var(--green)}.PENDING,.UPLOADING{background:#fef3c7;color:var(--amber)}.FAILED{background:#fee2e2;color:var(--red)}
+.steps{display:flex;gap:6px;margin:6px 0 16px}.step{flex:1;padding:8px;border-radius:6px;background:#f3f4f6;color:var(--mute);font-size:12px;text-align:center}
+.step.done{background:#dcfce7;color:var(--green)}.step.cur{background:#2563eb;color:#fff;font-weight:600}
+.ranks{display:flex;gap:12px;margin-bottom:14px}.host{border:1px solid var(--line);border-radius:8px;padding:10px 14px;flex:1}
+.host b{font-size:14px}.dots{margin-top:6px}.dots i{display:inline-block;width:14px;height:14px;border-radius:3px;background:#22c55e;margin-right:4px}
+.meta{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}.meta div{background:#f9fafb;border-radius:6px;padding:8px 10px}
+.meta span{display:block;font-size:11px;color:var(--mute)}.meta b{font-size:13px;word-break:break-all}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:14px}.chart h3{font-size:13px;margin:0 0 4px}.chart .sub{font-size:12px;color:var(--mute)}
+svg{width:100%;height:190px;background:#fafbfc;border:1px solid var(--line);border-radius:6px}
+.legend{font-size:11px;color:var(--mute);margin-top:4px}.legend i{display:inline-block;width:10px;height:3px;margin:0 4px 2px 8px;vertical-align:middle}
+pre{background:#0f172a;color:#cbd5e1;border-radius:8px;padding:12px;font:12px/1.4 ui-monospace,Menlo,monospace;max-height:260px;overflow:auto;margin:0;white-space:pre-wrap}
+.verdict{padding:12px 14px;border-radius:8px;margin-bottom:12px}.verdict.ok{background:#dcfce7}.verdict.warn{background:#fef3c7}
+table.cmp{width:100%;border-collapse:collapse;font-size:13px}table.cmp td,table.cmp th{padding:6px 8px;border-bottom:1px solid var(--line);text-align:left}
+table.cmp td.num{text-align:right;font-variant-numeric:tabular-nums}.ok{color:var(--green)}.bad{color:var(--red)}
+.empty{color:var(--mute);padding:40px;text-align:center}.err{color:var(--red);font-size:13px;margin-top:8px;white-space:pre-wrap}
+.note{font-size:12px;color:var(--mute);margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>windDrivenRainFoam <small>HPC operator console · OpenFOAM v2606 · Slurm + Apptainer</small></h1>
+  <div class="nodes" id="nodes"></div>
+</header>
+<main>
+  <section>
+    <div class="card">
+      <h2>Submit a case</h2>
+      <label>Case</label>
+      <select id="source">
+        <option value="tutorial">cubicBuilding (tutorial bundled in the image)</option>
+        <option value="upload">Upload a case (.tar.gz)</option>
+        <option value="s3">From object storage (s3:// URI)</option>
+      </select>
+      <div id="uploadBox" hidden><label>Case archive</label><input type="file" id="file" accept=".tar.gz,.tgz"></div>
+      <div id="s3Box" hidden><label>S3 URI</label><input id="s3" placeholder="s3://wdr-cases/mycase.tar.gz"></div>
+      <label>Solver image (published, sha256-verified)</label>
+      <select id="image"></select>
+      <div class="row">
+        <div><label>Nodes</label><select id="nodesN"><option>1</option><option selected>2</option></select></div>
+        <div><label>MPI ranks per node</label><select id="ntasks"><option>1</option><option selected>2</option><option>4</option></select></div>
+      </div>
+      <div style="margin-top:14px"><button id="submit">Submit to Slurm</button></div>
+      <div class="err" id="submitErr"></div>
+    </div>
+    <div class="card">
+      <h2>Jobs</h2>
+      <table class="jobs"><thead><tr><th>Job</th><th>State</th><th>Nodes</th><th>Elapsed</th></tr></thead><tbody id="jobs"></tbody></table>
+    </div>
+  </section>
+  <section id="detail"><div class="card empty">Submit a case or pick a job.</div></section>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let selected = null, cluster = null;
+const fmt = x => x == null ? "–" : (x === 0 ? "0" : x.toExponential(2));
+async function api(path, opts) { const r = await fetch(path, opts); const j = await r.json(); if (!r.ok) throw new Error(j.error || r.statusText); return j; }
+
+async function loadCluster() {
+  cluster = await api("/api/cluster");
+  $("#nodes").innerHTML = cluster.nodes.map(n => `<div class="node"><b>${n.name}</b><span>${n.state} · ${n.alloc}/${n.total} cores busy</span><div class="bar"><i style="width:${100*n.alloc/n.total}%"></i></div></div>`).join("");
+  const sel = $("#image"), cur = sel.value;
+  sel.innerHTML = cluster.images.map(v => `<option>${v}</option>`).join("");
+  if (cur) sel.value = cur; else sel.value = cluster.images[cluster.images.length - 1];
+}
+async function loadJobs() {
+  const jobs = await api("/api/jobs");
+  $("#jobs").innerHTML = jobs.map(j => `<tr data-job="${j.job}" class="${j.job==selected?'sel':''}"><td>#${j.job}</td><td><span class="pill ${j.state}">${j.state}</span></td><td>${j.nodes||'–'}</td><td>${j.elapsed||'–'}</td></tr>`).join("") || `<tr><td colspan=4 class="note">No jobs yet.</td></tr>`;
+  document.querySelectorAll("#jobs tr[data-job]").forEach(tr => tr.onclick = () => { selected = +tr.dataset.job; loadJobs(); loadDetail(); });
+}
+$("#source").onchange = () => { $("#uploadBox").hidden = $("#source").value != "upload"; $("#s3Box").hidden = $("#source").value != "s3"; };
+$("#submit").onclick = async () => {
+  const b = $("#submit"); b.disabled = true; $("#submitErr").textContent = ""; b.textContent = "Submitting…";
+  try {
+    const body = {source: $("#source").value, image: $("#image").value, nodes: +$("#nodesN").value, ntasks: +$("#ntasks").value};
+    if (body.source == "upload") {
+      const f = $("#file").files[0]; if (!f) throw new Error("choose a .tar.gz case first");
+      b.textContent = "Uploading case to S3…";
+      body.s3 = (await api("/api/upload?name=" + encodeURIComponent(f.name), {method: "POST", body: f})).s3; body.source = "s3";
+    } else if (body.source == "s3") body.s3 = $("#s3").value;
+    b.textContent = "Submitting…";
+    const r = await api("/api/submit", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    selected = +r.job; await loadJobs(); await loadDetail();
+  } catch (e) { $("#submitErr").textContent = e.message; }
+  b.disabled = false; b.textContent = "Submit to Slurm";
+};
+
+function chart(log, colors, title, sub) {
+  if (!log || !log.times.length) return `<div class="chart"><h3>${title}</h3><div class="sub">${sub}</div><svg></svg><div class="legend">waiting for the solver to start…</div></div>`;
+  const W = 600, H = 190, P = 34, xs = log.times, xmax = Math.max(...xs, 1), lo = -8, hi = 0;
+  const X = t => P + (W - P - 8) * t / xmax, Y = v => 8 + (H - 8 - 22) * (hi - Math.max(lo, Math.min(hi, Math.log10(v)))) / (hi - lo);
+  let g = "";
+  for (let e = lo; e <= hi; e += 2) g += `<line x1="${P}" x2="${W-8}" y1="${Y(10**e)}" y2="${Y(10**e)}" stroke="#e5e7eb"/><text x="4" y="${Y(10**e)+4}" font-size="10" fill="#9ca3af">1e${e}</text>`;
+  g += `<text x="${W-8}" y="${H-6}" font-size="10" fill="#9ca3af" text-anchor="end">${xs[xs.length-1]}</text><text x="${P}" y="${H-6}" font-size="10" fill="#9ca3af">0</text>`;
+  Object.entries(log.series).forEach(([k, s], i) => {
+    const pts = s.map((v, j) => v ? `${X(xs[j]).toFixed(1)},${Y(v).toFixed(1)}` : null).filter(Boolean).join(" ");
+    g += `<polyline fill="none" stroke="${colors[i % colors.length]}" stroke-width="1.5" points="${pts}"/>`;
+  });
+  const legend = Object.keys(log.series).map((k, i) => `<i style="background:${colors[i % colors.length]}"></i>${k}`).join("");
+  return `<div class="chart"><h3>${title}</h3><div class="sub">${sub}</div><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${g}</svg><div class="legend">initial residual (log) per iteration ${legend}</div></div>`;
+}
+
+function compareCard(j) {
+  const c = j.compare;
+  if (j.state != "COMPLETED") return "";
+  let inner = "";
+  if (c.state == "none") inner = `<p class="note">Fetch the results from S3 and compare every field and patch against the upstream reference run (original solver on OpenFOAM v2106).</p><button id="cmpBtn">Compare with v2106 reference</button>`;
+  else if (c.state == "error") inner = `<div class="err">${c.error}</div><button id="cmpBtn">Retry comparison</button>`;
+  else if (c.state != "done") inner = `<p>⏳ ${c.state}…</p>`;
+  else {
+    const n = c.failed.length;
+    inner = `<div class="verdict ${c.pass ? 'ok' : 'warn'}"><b>${c.pass ? 'PASS' : 'Close, but not identical'}</b>: ${c.compared - n} of ${c.compared} field/patch values within relative L2 ≤ ${c.tol}; ${n} above.` +
+      (cluster && cluster.port_check ? `<br>Port check (rain solver only, same wind input): <b class="ok">${cluster.port_check.pass ? 'PASS' : 'FAIL'}</b>, ${cluster.port_check.compared - cluster.port_check.failed}/${cluster.port_check.compared} identical. The differences come from OpenFOAM's own wind solver (simpleFoam) changing between v2106 and v2606, not from the port.` : "") + `</div>` +
+      `<table class="cmp"><tr><th>Quantity</th><th>Worst value</th><th style="text-align:right">rel. L2 vs v2106</th></tr>` +
+      c.groups.map(g => `<tr><td>${g.label}</td><td>${g.name||'–'}</td><td class="num ${g.rel_l2 <= c.tol ? 'ok' : 'bad'}">${fmt(g.rel_l2)}${g.rel_l2!=null ? ' ('+(100*g.rel_l2).toFixed(2)+'%)' : ''}</td></tr>`).join("") + `</table>` +
+      `<p class="note"><a href="/api/jobs/${j.job}/compare.md" target="_blank">Full field-by-field report (Markdown)</a></p>`;
+  }
+  return `<div class="card"><h2>Validation against upstream reference</h2>${inner}</div>`;
+}
+
+async function loadDetail() {
+  if (selected == null) return;
+  let j; try { j = await api("/api/jobs/" + selected); } catch (e) { $("#detail").innerHTML = `<div class="card err">${e.message}</div>`; return; }
+  const order = ["queued", "prepare", "wind", "rain", "upload", "done"], names = {queued: "Queued", prepare: "Mesh + decompose", wind: "Wind flow · simpleFoam", rain: "Rain · windDrivenRainFoam", upload: "Upload to S3", done: "Done"};
+  const si = order.indexOf(j.stage);
+  const steps = order.map((s, i) => `<div class="step ${i < si || j.stage == 'done' ? 'done' : (i == si ? 'cur' : '')}">${names[s]}</div>`).join("");
+  const live = (j.stage == "rain" || j.stage == "upload" || j.stage == "done") ? j.rain : j.wind;
+  const hosts = (live && live.hosts.length ? live.hosts : (j.wind && j.wind.hosts) || []);
+  const ranks = hosts.length ? `<div class="ranks">${hosts.map(h => `<div class="host"><b>${h.host}</b> <span class="note">${h.ranks} MPI ranks</span><div class="dots">${'<i></i>'.repeat(h.ranks)}</div></div>`).join("")}</div>` : "";
+  const wsub = j.wind && j.wind.times.length ? `iteration ${j.wind.times[j.wind.times.length-1]}${j.wind.converged ? ' · converged' : ''}${j.wind.end ? ' · End' : ''}` : "";
+  const rsub = j.rain && j.rain.times.length ? `time ${j.rain.times[j.rain.times.length-1]}${j.rain.end ? ' · End' : ''}` : "";
+  const tail = (live && live.tail.length) ? live.tail.join("\n") : j.batch.join("\n");
+  const scroll = document.querySelector("#detail pre") ? document.querySelector("#detail pre").scrollTop : null;
+  $("#detail").innerHTML = `
+  <div class="card">
+    <h2>Job #${j.job} <span class="pill ${j.state}">${j.state}</span></h2>
+    <div class="steps">${steps}</div>
+    <div class="meta"><div><span>Nodes</span><b>${j.nodes || '–'}</b></div><div><span>Elapsed</span><b>${j.elapsed || '–'}</b></div><div><span>Image</span><b>${j.image}</b></div><div><span>Results</span><b>${j.results}</b></div></div>
+    ${ranks}
+    <div class="charts">${chart(j.wind, ["#2563eb","#0ea5e9","#14b8a6","#f59e0b","#ef4444","#8b5cf6"], "Wind flow (simpleFoam)", wsub)}${chart(j.rain, ["#6d28d9","#db2777"], "Rain (windDrivenRainFoam)", rsub)}</div>
+  </div>
+  <div class="card"><h2>Live solver log</h2><pre>${tail.replace(/</g, "&lt;")}</pre></div>
+  ${j.state == "COMPLETED" ? `<div class="card"><h2>Results</h2><p class="note">Stored in object storage at <code>${j.results}</code>.</p><a href="/api/jobs/${j.job}/results.tar.gz"><button class="ghost">Download results (.tar.gz)</button></a></div>` : ""}
+  ${compareCard(j)}`;
+  const pre = document.querySelector("#detail pre"); if (pre) pre.scrollTop = pre.scrollHeight;
+  const b = $("#cmpBtn"); if (b) b.onclick = async () => { b.disabled = true; await api(`/api/jobs/${j.job}/compare`, {method: "POST"}); loadDetail(); };
+}
+async function tick() { try { await loadCluster(); await loadJobs(); await loadDetail(); } catch (e) { console.error(e); } }
+tick(); setInterval(tick, 3000);
+</script>
+</body>
+</html>

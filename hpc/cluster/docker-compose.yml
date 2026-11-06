@@ -1,5 +1,5 @@
 # Local stand-in for the proposed AWS prototype environment:
-#   head  = Slurm controller + login node (operator CLI runs here)
+#   head  = Slurm controller + login node (operator CLI and web console run here)
 #   c1,c2 = Slurm compute nodes with Apptainer (4 cores each)
 #   s3    = S3-compatible object storage (SeaweedFS) for cases, results and the versioned image
 # /shared is the cluster shared filesystem (FSx for Lustre / EFS on AWS).
@@ -11,6 +11,7 @@ x-node: &node
     - ${SHARED_DIR:-./state/shared}:/shared
     - ${STATE_DIR:-./state}/munge:/etc/munge-shared:ro
     - ../operator:/opt/wdr-operator:ro
+    - ../validation:/opt/validation:ro
     - ../slurm:/opt/wdr-slurm:ro
   networks: [hpc]
   environment:
@@ -31,6 +32,7 @@ services:
     <<: *node
     hostname: head
     command: head
+    ports: ["127.0.0.1:8080:8080"]  # wdr-web operator console
   c1:
     <<: *node
     hostname: c1

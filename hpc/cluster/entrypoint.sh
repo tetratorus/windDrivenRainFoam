@@ -13,7 +13,10 @@ if [ "$1" = compute ]; then
   echo "+cpu +cpuset +memory +pids" > /sys/fs/cgroup/system.slice/cgroup.subtree_control
 fi
 case "$1" in
-  head)   exec /usr/sbin/slurmctld -D -i ;;
+  head)
+    # operator web console (wdr-web), runs as the operator account on the login node
+    su operator1 -c "WDR_REFERENCE=${WDR_REFERENCE:-/shared/reference/cubicBuilding} /opt/wdr-operator/wdr-web --port 8080 >> /tmp/wdr-web.log 2>&1" &
+    exec /usr/sbin/slurmctld -D -i ;;
   compute) exec /usr/sbin/slurmd -D -N "$(hostname)" ;;
   *) exec "$@" ;;
 esac

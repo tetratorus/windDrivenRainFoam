@@ -64,3 +64,14 @@ sbatch --nodes=2 --ntasks-per-node=2 hpc/slurm/wdr.sbatch /shared/images/<v>/win
 - SeaweedFS as the S3 store
 
 Run commands on it with `docker compose exec -u operator1 head wdr ...`.
+
+## Web console
+
+The same flow is available in a browser. `hpc/operator/wdr-web` (Python standard library only) runs on
+the login node next to the `wdr` CLI and calls it for every action; `hpc/operator/wdr-web.html` is the page.
+In the local cluster it starts with the head container and is published on `http://127.0.0.1:8080`.
+
+- **Submit:** bundled cubicBuilding tutorial, an uploaded `.tar.gz` case, or an `s3://` case; pick image, nodes and ranks per node.
+- **Watch:** Slurm node load, job stage, which hosts the MPI ranks landed on, residual plots for both solvers, live log.
+- **Results:** download `results.tar.gz` from object storage.
+- **Validate:** compare against the v2106 reference in `/shared/reference/cubicBuilding` with `hpc/validation/compare.py`; summary plus full Markdown report.

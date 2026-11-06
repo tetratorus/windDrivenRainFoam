@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""wdr-web - browser front end for the wdr operator CLI (run on the login node).
+
+  wdr-web [--host 0.0.0.0] [--port 8080]
+
+Same storage and Slurm conventions as `wdr`: images from the image bucket, cases staged on
+WDR_SHARED, results in the result bucket. Comparison uses validation/compare.py against
+WDR_REFERENCE (default /shared/reference/cubicBuilding, the upstream v2106 reference run).
+"""
+import argparse, json, os, pathlib, re, subprocess, sys, tempfile, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.machinery import SourceFileLoader
+from urllib.parse import urlparse, parse_qs
+
+HERE = pathlib.Path(__file__).resolve().parent
+wdr = SourceFileLoader("wdr", str(HERE / "wdr")).load_module()
+SHARED = wdr.SHARED
+JOBS = SHARED / "jobs"
+RESULTS_DIR = SHARED / "results"
+REFERENCE = pathlib.Path(os.environ.get("WDR_REFERENCE", SHARED / "reference" / "cubicBuilding"))
+VALIDATION = pathlib.Path(os.environ.get("WDR_VALIDATION", HERE.parent / "validation"))
+COMPARE = VALIDATION / "compare.py"
+PORT_CHECK = VALIDATION / "results" / "port-check.json"
+WDR = [sys.executable, str(HERE / "wdr")]
+TIME_RE = re.compile(r"^Time = (\S+)")
+RES_RE = re.compile(r"Solving for (\w+), Initial residual = ([0-9.eE+-]+)")
+_cache, _lock = {}, threading.Lock()
+
+
+def sh(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+
+
+def cluster():
+    nodes = []
+    for line in sh("sinfo", "-N", "-h", "-o", "%N %T %C").splitlines():
+        name, state, cpus = line.split()
+        a, i, o, t = (int(x) for x in cpus.split("/"))
+        nodes.append({"name": name, "state": state, "alloc": a, "total": t})
+    return {"nodes": nodes, "images": wdr.versions(), "reference": REFERENCE.is_dir(),
+            "port_check": port_check()}
+
+
+def port_check():
+    if not PORT_CHECK.exists():
+        return None
+    s = json.loads(PORT_CHECK.read_text())["summary"]
+    return {"pass": s["pass"], "compared": s["compared"], "failed": len(s["failed"])}
+
+
+def job_ids():
+    return sorted((int(p.stem) for p in JOBS.glob("*.json") if p.stem.isdigit()), reverse=True)
+
+
+def batch_out(m):
+    outs = sorted(pathlib.Path(m["work"]).glob("wdr-*.out"))
+    return outs[0].read_text(errors="replace") if outs else ""
+
+
+def state(job, m, out):
+    q = sh("squeue", "-h", "-j", str(job), "-o", "%T|%M|%N")
+    if q:
+        st, elapsed, nodes = q.split("|")
+        return st, elapsed, nodes
+    case = pathlib.Path(m["work"]) / "case"
+    if (case / "STATUS").exists() and re.search(r"\] done$", out, re.M):
+        st = "COMPLETED"
+    elif (case / "STATUS").exists():
+        st = "UPLOADING"
+    else:
+        st = "FAILED"
+    stamps = re.findall(r"^\[(\S+)Z\]", out, re.M)
+    elapsed = ""
+    if len(stamps) >= 2:
+        t = [time.mktime(time.strptime(s, "%Y-%m-%dT%H:%M:%S")) for s in (stamps[0], stamps[-1])]
+        d = int(t[1] - t[0]); elapsed = f"{d // 60}:{d % 60:02d}"
+    nodes = re.search(r"across \d+ nodes \(([^)]*)\)", out)
+    return st, elapsed, nodes.group(1) if nodes else ""
+
+
+def stage(out, st):
+    if st == "COMPLETED":
+        return "done"
+    for key, pat in (("upload", "uploading results"), ("rain", "windDrivenRainFoam on"),
+                     ("wind", "simpleFoam on")):
+        if pat in out:
+            return key
+    return "queued" if st == "PENDING" else "prepare"
+
+
+def parse_log(path, groups):
+    """Initial residual per iteration, max over each field group; cached on (size, mtime)."""
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    key = (str(path), st.st_size, st.st_mtime)
+    with _lock:
+        if _cache.get(str(path), (None,))[0] == key:
+            return _cache[str(path)][1]
+    times, series, hosts, cur, end = [], {g: [] for g in groups}, [], None, False
+    text = path.read_text(errors="replace")
+    m = re.search(r"Hosts\s*:\s*\(\s*(.*?)\n\)", text, re.S)
+    if m:
+        hosts = [{"host": h, "ranks": int(n)} for h, n in re.findall(r"\((\S+) (\d+)\)", m.group(1))]
+    for line in text.splitlines():
+        t = TIME_RE.match(line)
+        if t:
+            cur = {g: None for g in groups}
+            times.append(float(t.group(1)))
+            for g in groups:
+                series[g].append(None)
+            continue
+        r = RES_RE.search(line)
+        if r and cur is not None:
+            f, v = r.group(1), float(r.group(2))
+            for g, pat in groups.items():
+                if re.fullmatch(pat, f):
+                    i = len(times) - 1
+                    series[g][i] = v if series[g][i] is None else max(series[g][i], v)
+        if line.startswith("End"):
+            end = True
+    tail = text.splitlines()[-18:]
+    res = {"times": times, "series": series, "hosts": hosts, "end": end, "tail": tail,
+           "converged": bool(re.search(r"converged in \d+ iterations", text))}
+    with _lock:
+        _cache[str(path)] = (key, res)
+    return res
+
+
+WIND = {"Ux": "Ux", "Uy": "Uy", "Uz": "Uz", "p": "p", "k": "k", "epsilon": "epsilon"}
+RAIN = {"alpha (max of 17)": r"alpha\d+", "U (max of 17)": r"U\d+[xyz]"}
+
+
+def thin(log, n=400):
+    if not log or len(log["times"]) <= n:
+        return log
+    step = len(log["times"]) / n
+    idx = sorted({int(i * step) for i in range(n)} | {len(log["times"]) - 1})
+    return {**log, "times": [log["times"][i] for i in idx],
+            "series": {g: [s[i] for i in idx] for g, s in log["series"].items()}}
+
+
+def job_detail(job):
+    m = wdr.meta(str(job))
+    out = batch_out(m)
+    st, elapsed, nodes = state(job, m, out)
+    case = pathlib.Path(m["work"]) / "case"
+    wind = next(case.glob("*.simpleFoam"), None)
+    rain = next(case.glob("*.windDrivenRainFoam"), None)
+    wl = parse_log(wind / "log.simpleFoam", WIND) if wind else None
+    rl = parse_log(rain / "log.windDrivenRainFoam", RAIN) if rain else None
+    return {"job": job, **m, "state": st, "elapsed": elapsed, "nodes": nodes, "stage": stage(out, st),
+            "batch": out.splitlines()[-25:], "wind": thin(wl), "rain": thin(rl), "compare": compare_state(job)}
+
+
+def job_summary(job):
+    m = wdr.meta(str(job))
+    out = batch_out(m)
+    st, elapsed, nodes = state(job, m, out)
+    return {"job": job, "state": st, "elapsed": elapsed, "nodes": nodes, "image": m["image"],
+            "submitted": pathlib.Path(m["work"]).name.split("-")[0], "case": m["case"]}
+
+
+def submit(body):
+    version = body.get("image") or wdr.latest_image()
+    nodes, ntasks = int(body.get("nodes", 2)), int(body.get("ntasks", 2))
+    source = body.get("source", "tutorial")
+    if source == "tutorial":
+        sif = wdr.fetch_image(version)
+        stage_dir = pathlib.Path(tempfile.mkdtemp(dir=SHARED / "staging" if (SHARED / "staging").is_dir() else None))
+        r = subprocess.run(["apptainer", "run", "--bind", str(stage_dir), str(sif), "init-tutorial", str(stage_dir / "cubicBuilding")],
+                           capture_output=True, text=True)
+        if r.returncode:
+            raise RuntimeError(r.stderr or r.stdout)
+        case = str(stage_dir / "cubicBuilding")
+    else:
+        case = body["s3"]
+    r = subprocess.run(WDR + ["submit", case, "--image", version, "--nodes", str(nodes),
+                              "--ntasks-per-node", str(ntasks)], capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError(r.stderr or r.stdout)
+    return json.loads(r.stdout[r.stdout.index("{"):])
+
+
+def upload(name, data):
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name) or "case.tar.gz"
+    uri = f"s3://{wdr.CASES}/uploads/{time.strftime('%Y%m%dT%H%M%S')}-{safe}"
+    with tempfile.NamedTemporaryFile() as f:
+        f.write(data); f.flush()
+        wdr.put(f.name, uri)
+    return uri
+
+
+def compare_dir(job):
+    return RESULTS_DIR / str(job)
+
+
+def compare_state(job):
+    d = compare_dir(job)
+    if (d / "compare.json").exists():
+        rep = json.loads((d / "compare.json").read_text())
+        return {"state": "done", **summarise(rep)}
+    if (d / "compare.err").exists():
+        return {"state": "error", "error": (d / "compare.err").read_text()[-2000:]}
+    if (d / "compare.running").exists():
+        return {"state": (d / "compare.running").read_text().strip() or "running"}
+    return {"state": "none"}
+
+
+def summarise(rep):
+    rows = rep["rows"]
+    def worst(pred):
+        rs = [r for r in rows if pred(r)]
+        if not rs:
+            return None
+        r = max(rs, key=lambda r: r["rel_l2"])
+        return {"name": f"{r['field']} / {r['part']}", "rel_l2": r["rel_l2"], "n": len(rs)}
+    groups = [
+        ("Wind velocity U, flux phi (internal)", lambda r: r["case"] == "simpleFoam" and r["field"] in ("U", "phi") and r["part"] == "internal"),
+        ("Wind turbulence k, epsilon, nut, p (internal)", lambda r: r["case"] == "simpleFoam" and r["field"] in ("k", "epsilon", "nut", "p") and r["part"] == "internal"),
+        ("Rain velocity and volume fraction (internal)", lambda r: r["case"] == "windDrivenRainFoam" and r["part"] == "internal"),
+        ("Catch ratio scr on the building", lambda r: r["field"].startswith("scr") and r["part"] == "patch:cube"),
+        ("Rain volume fraction on the building wall", lambda r: r["field"].startswith("alpha") and r["part"] == "patch:cube"),
+    ]
+    s = rep["summary"]
+    return {"pass": s["pass"], "compared": s["compared"], "failed": s["failed"], "tol": s["tolerance_rel_l2"],
+            "groups": [{"label": l, **(worst(p) or {})} for l, p in groups],
+            "worst": [{"name": f"{r['case']} / {r['field']} / {r['part']}", "rel_l2": r["rel_l2"], "max_abs": r["max_abs"]}
+                      for r in sorted(rows, key=lambda r: -r["rel_l2"])[:10]]}
+
+
+def run_compare(job):
+    d = compare_dir(job)
+    d.mkdir(parents=True, exist_ok=True)
+    for f in ("compare.err", "compare.json"):
+        (d / f).unlink(missing_ok=True)
+    try:
+        (d / "compare.running").write_text("downloading results from S3")
+        if not (d / "case").is_dir():
+            wdr.fetch(argparse.Namespace(job=str(job), dest=str(d)))
+        (d / "compare.running").write_text("comparing fields with the v2106 reference")
+        r = subprocess.run([sys.executable, str(COMPARE), str(REFERENCE), str(d / "case"),
+                            "--md", str(d / "compare.md"), "--json", str(d / "compare.tmp.json")],
+                           capture_output=True, text=True)
+        if not (d / "compare.tmp.json").exists():
+            raise RuntimeError(r.stderr or r.stdout)
+        (d / "compare.tmp.json").rename(d / "compare.json")
+    except Exception as e:
+        (d / "compare.err").write_text(str(e))
+    finally:
+        (d / "compare.running").unlink(missing_ok=True)
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def send(self, code, body, ctype="application/json"):
+        data = body if isinstance(body, bytes) else (json.dumps(body) if ctype == "application/json" else body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def route(self, method):
+        u = urlparse(self.path)
+        parts = [p for p in u.path.split("/") if p]
+        try:
+            if method == "GET" and not parts:
+                return self.send(200, PAGE, "text/html; charset=utf-8")
+            if parts[:1] != ["api"]:
+                return self.send(404, {"error": "not found"})
+            p = parts[1:]
+            if method == "GET" and p == ["cluster"]:
+                return self.send(200, cluster())
+            if method == "GET" and p == ["jobs"]:
+                return self.send(200, [job_summary(j) for j in job_ids()])
+            if method == "POST" and p == ["submit"]:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                return self.send(200, submit(body))
+            if method == "POST" and p == ["upload"]:
+                name = parse_qs(u.query).get("name", ["case.tar.gz"])[0]
+                return self.send(200, {"s3": upload(name, self.rfile.read(int(self.headers["Content-Length"])))})
+            if len(p) >= 2 and p[0] == "jobs" and p[1].isdigit():
+                job = int(p[1])
+                if method == "GET" and len(p) == 2:
+                    return self.send(200, job_detail(job))
+                if method == "GET" and p[2:] == ["results.tar.gz"]:
+                    return self.download(job)
+                if method == "GET" and p[2:] == ["compare.md"]:
+                    return self.send(200, (compare_dir(job) / "compare.md").read_bytes(), "text/markdown; charset=utf-8")
+                if method == "POST" and p[2:] == ["compare"]:
+                    if compare_state(job)["state"] not in ("downloading results from S3", "comparing fields with the v2106 reference"):
+                        (compare_dir(job)).mkdir(parents=True, exist_ok=True)
+                        (compare_dir(job) / "compare.running").write_text("starting")
+                        threading.Thread(target=run_compare, args=(job,), daemon=True).start()
+                    return self.send(200, {"state": "running"})
+            return self.send(404, {"error": "not found"})
+        except SystemExit as e:
+            return self.send(400, {"error": str(e)})
+        except Exception as e:
+            return self.send(500, {"error": str(e)})
+
+    def download(self, job):
+        b, k = wdr.split(wdr.meta(str(job))["results"])
+        obj = wdr.s3().get_object(Bucket=b, Key=k)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/gzip")
+        self.send_header("Content-Length", str(obj["ContentLength"]))
+        self.send_header("Content-Disposition", f'attachment; filename="wdr-job{job}-results.tar.gz"')
+        self.end_headers()
+        for chunk in obj["Body"].iter_chunks(1 << 20):
+            self.wfile.write(chunk)
+
+    def do_GET(self):
+        self.route("GET")
+
+    def do_POST(self):
+        self.route("POST")
+
+
+PAGE = (HERE / "wdr-web.html").read_text() if (HERE / "wdr-web.html").exists() else "<h1>wdr-web.html missing</h1>"
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="wdr-web", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--host", default="0.0.0.0"); ap.add_argument("--port", type=int, default=8080)
+    a = ap.parse_args()
+    print(f"wdr-web on http://{a.host}:{a.port}", flush=True)
+    ThreadingHTTPServer((a.host, a.port), H).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
