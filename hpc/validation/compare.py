@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare a v2606 cubicBuilding result against the upstream v2106 reference, field by field.
 
-usage: compare.py REF_CASE NEW_CASE [--tol 1e-3] [--md report.md] [--json out.json]
+usage: compare.py REF_CASE NEW_CASE [--tol 1e-3] [--sub windDrivenRainFoam] [--md report.md] [--json out.json]
 REF_CASE/NEW_CASE hold *.simpleFoam and *.windDrivenRainFoam; the latest time of each sub-case is compared.
 Every field file present in both is compared over internal cells and every patch (values written
 as `uniform` or `nonuniform`). Metric: relative L2 = |new-ref|_2 / |ref|_2 (all components), plus max |new-ref|.
@@ -82,10 +82,12 @@ def main():
     ap.add_argument("ref"); ap.add_argument("new")
     ap.add_argument("--tol", type=float, default=1e-3)
     ap.add_argument("--md"); ap.add_argument("--json")
+    ap.add_argument("--sub", action="append", choices=("simpleFoam", "windDrivenRainFoam"),
+                    help="compare only this sub-case (repeatable; default both)")
     a = ap.parse_args()
     ref, new = pathlib.Path(a.ref), pathlib.Path(a.new)
     rows, ok = [], True
-    for sub in ("simpleFoam", "windDrivenRainFoam"):
+    for sub in a.sub or ("simpleFoam", "windDrivenRainFoam"):
         rc = next(ref.glob(f"*.{sub}")); nc = next(new.glob(f"*.{sub}"))
         rt, nt = latest(rc), latest(nc)
         if not rt or not nt:
