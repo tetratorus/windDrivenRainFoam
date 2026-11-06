@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""wdr - submit windDrivenRainFoam cases to Slurm and get results back (run on the login node).
+
+  wdr image push SIF VERSION        publish an image (+ .sha256, SBOM, manifest) to the image bucket
+  wdr image list                    list published image versions
+  wdr submit CASE [--image VERSION] [--nodes N] [--ntasks-per-node M]
+                                    CASE = local case dir, or s3://bucket/key.tar.gz
+  wdr status JOB                    Slurm state + result location
+  wdr logs JOB                      job output so far
+  wdr fetch JOB DEST                download and unpack results
+  wdr put FILE s3://bucket/key      (used by the batch job)
+
+Storage: S3 (S3_ENDPOINT for non-AWS), buckets from WDR_IMAGE_BUCKET / WDR_CASE_BUCKET / WDR_RESULT_BUCKET.
+Work dirs live on the shared filesystem WDR_SHARED (default /shared).
+"""
+import argparse, hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time
+import boto3
+
+SHARED = pathlib.Path(os.environ.get("WDR_SHARED", "/shared"))
+IMAGES = os.environ.get("WDR_IMAGE_BUCKET", "wdr-images")
+CASES = os.environ.get("WDR_CASE_BUCKET", "wdr-cases")
+RESULTS = os.environ.get("WDR_RESULT_BUCKET", "wdr-results")
+HERE = pathlib.Path(__file__).resolve().parent
+SBATCH = pathlib.Path(os.environ.get("WDR_SBATCH", HERE.parent / "slurm" / "wdr.sbatch"))
+
+
+def s3():
+    return boto3.client("s3", endpoint_url=os.environ.get("S3_ENDPOINT") or None)
+
+
+def ensure_bucket(b):
+    c = s3()
+    try:
+        c.head_bucket(Bucket=b)
+    except Exception:
+        c.create_bucket(Bucket=b)
+
+
+def split(uri):
+    m = re.match(r"s3://([^/]+)/(.+)", uri)
+    if not m:
+        sys.exit(f"not an s3:// uri: {uri}")
+    return m.group(1), m.group(2)
+
+
+def sha256(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def put(local, uri):
+    b, k = split(uri)
+    ensure_bucket(b)
+    s3().upload_file(str(local), b, k)
+    print(f"uploaded {uri}")
+
+
+def get(uri, local):
+    b, k = split(uri)
+    s3().download_file(b, k, str(local))
+
+
+def image_push(a):
+    sif = pathlib.Path(a.sif)
+    digest = sha256(sif)
+    pre = f"s3://{IMAGES}/windDrivenRainFoam/{a.version}"
+    put(sif, f"{pre}/windDrivenRainFoam.sif")
+    side = sif.parent
+    for name in ("sbom.spdx.json", "manifest.json"):
+        if (side / name).exists():
+            put(side / name, f"{pre}/{name}")
+    tmp = pathlib.Path(tempfile.mkdtemp()) / "windDrivenRainFoam.sif.sha256"
+    tmp.write_text(f"{digest}  windDrivenRainFoam.sif\n")
+    put(tmp, f"{pre}/windDrivenRainFoam.sif.sha256")
+    print(f"image {a.version} sha256 {digest}")
+
+
+def versions():
+    try:
+        r = s3().list_objects_v2(Bucket=IMAGES, Prefix="windDrivenRainFoam/", Delimiter="/")
+    except s3().exceptions.NoSuchBucket:
+        return []
+    return sorted(p["Prefix"].split("/")[1] for p in r.get("CommonPrefixes", []))
+
+
+def image_list(a):
+    for v in versions():
+        print(v)
+
+
+def fetch_image(version):
+    """Copy a published image to the shared filesystem once, verified by sha256."""
+    d = SHARED / "images" / version
+    sif = d / "windDrivenRainFoam.sif"
+    if not sif.exists():
+        d.mkdir(parents=True, exist_ok=True)
+        pre = f"s3://{IMAGES}/windDrivenRainFoam/{version}"
+        get(f"{pre}/windDrivenRainFoam.sif.sha256", d / "windDrivenRainFoam.sif.sha256")
+        get(f"{pre}/windDrivenRainFoam.sif", d / "windDrivenRainFoam.sif.part")
+        want = (d / "windDrivenRainFoam.sif.sha256").read_text().split()[0]
+        if sha256(d / "windDrivenRainFoam.sif.part") != want:
+            sys.exit("image checksum mismatch")
+        (d / "windDrivenRainFoam.sif.part").rename(sif)
+    return sif
+
+
+def latest_image():
+    vs = versions()
+    if not vs:
+        sys.exit("no published image; run `wdr image push` first")
+    return sorted(vs)[-1]
+
+
+def submit(a):
+    version = a.image or latest_image()
+    sif = fetch_image(version)
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    work = SHARED / "jobs" / f"{stamp}-{os.getpid()}"
+    work.mkdir(parents=True)
+    with tempfile.TemporaryDirectory() as t:
+        tgz = pathlib.Path(t) / "case.tar.gz"
+        if a.case.startswith("s3://"):
+            src_uri = a.case
+            get(a.case, tgz)
+        else:
+            src = pathlib.Path(a.case)
+            with tarfile.open(tgz, "w:gz") as tf:
+                tf.add(src, arcname="case")
+            src_uri = f"s3://{CASES}/{work.name}/case.tar.gz"
+            put(tgz, src_uri)
+        with tarfile.open(tgz) as tf:
+            tf.extractall(work / "in", filter="data")
+    tops = [p for p in (work / "in").iterdir() if p.is_dir()]
+    case = work / "case"
+    shutil.move(str(tops[0]), case)
+    shutil.rmtree(work / "in")
+    os.chmod(work, 0o777)
+    result_uri = f"s3://{RESULTS}/{work.name}"
+    out = subprocess.run(
+        ["sbatch", "--parsable", f"--nodes={a.nodes}", f"--ntasks-per-node={a.ntasks_per_node}",
+         f"--chdir={work}", f"--job-name=wdr-{work.name}", str(SBATCH), str(sif), str(case), result_uri],
+        check=True, capture_output=True, text=True).stdout.strip()
+    job = out.split(";")[0]
+    meta = {"job": job, "work": str(work), "image": version, "case": src_uri, "results": f"{result_uri}/results.tar.gz"}
+    (work / "job.json").write_text(json.dumps(meta, indent=2))
+    (SHARED / "jobs" / f"{job}.json").write_text(json.dumps(meta, indent=2))
+    print(json.dumps(meta, indent=2))
+
+
+def meta(job):
+    p = SHARED / "jobs" / f"{job}.json"
+    if not p.exists():
+        sys.exit(f"unknown job {job}")
+    return json.loads(p.read_text())
+
+
+def status(a):
+    m = meta(a.job)
+    st = subprocess.run(["squeue", "-h", "-j", a.job, "-o", "%T %M %N"], capture_output=True, text=True).stdout.strip()
+    if not st:
+        ok = (pathlib.Path(m["work"]) / "case" / "STATUS").exists()
+        st = "COMPLETED" if ok else "FINISHED-WITHOUT-SUCCESS (see `wdr logs`)"
+    print(f"job {a.job}: {st}\nresults: {m['results']}")
+
+
+def logs(a):
+    m = meta(a.job)
+    for f in sorted(pathlib.Path(m["work"]).glob("wdr-*.out")):
+        print(f.read_text())
+
+
+def fetch(a):
+    m = meta(a.job)
+    dest = pathlib.Path(a.dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    tgz = dest / "results.tar.gz"
+    get(m["results"], tgz)
+    with tarfile.open(tgz) as tf:
+        tf.extractall(dest, filter="data")
+    print(f"results in {dest}")
+
+
+def main():
+    p = argparse.ArgumentParser(prog="wdr", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp = p.add_subparsers(dest="cmd", required=True)
+    im = sp.add_parser("image").add_subparsers(dest="icmd", required=True)
+    x = im.add_parser("push"); x.add_argument("sif"); x.add_argument("version"); x.set_defaults(f=image_push)
+    x = im.add_parser("list"); x.set_defaults(f=image_list)
+    x = sp.add_parser("submit"); x.add_argument("case"); x.add_argument("--image")
+    x.add_argument("--nodes", type=int, default=2); x.add_argument("--ntasks-per-node", type=int, default=2)
+    x.set_defaults(f=submit)
+    for name, fn in (("status", status), ("logs", logs)):
+        x = sp.add_parser(name); x.add_argument("job"); x.set_defaults(f=fn)
+    x = sp.add_parser("fetch"); x.add_argument("job"); x.add_argument("dest"); x.set_defaults(f=fetch)
+    x = sp.add_parser("put"); x.add_argument("file"); x.add_argument("uri"); x.set_defaults(f=lambda a: put(a.file, a.uri))
+    a = p.parse_args()
+    a.f(a)
+
+
+if __name__ == "__main__":
+    main()

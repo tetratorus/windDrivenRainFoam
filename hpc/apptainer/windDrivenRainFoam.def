@@ -1,0 +1,58 @@
+# Stage 2 of 2: windDrivenRainFoam compiled inside the image, on top of the pinned v2606 toolchain (stage 1).
+# Built by ../build.sh, which stages the solver sources (git-tracked files only) into build/ctx/solver.
+Bootstrap: localimage
+From: {{ TOOLCHAIN_SIF }}
+
+%arguments
+    TOOLCHAIN_SIF=build/openfoam-v2606.sif
+    SOLVER_REV=unknown
+    TUTORIALS_REV=unknown
+
+%files
+    build/ctx/solver /opt/wdr/src
+    build/ctx/tutorials/cubicBuilding /opt/wdr/tutorials/cubicBuilding
+    apptainer/wdr-case /opt/wdr/bin/wdr-case
+
+%post
+    set -eu
+    bash -euc '
+      set +eu; . /opt/OpenFOAM-v2606/etc/bashrc; set -eu
+      export FOAM_USER_APPBIN=/opt/wdr/bin FOAM_USER_LIBBIN=/opt/wdr/lib
+      cd /opt/wdr/src
+      # FOAM_COMPILE_STRICT turns every API marked deprecated in v2606 into a compiler warning;
+      # the port is only accepted if the solver compiles with zero warnings.
+      wmake -strict > /opt/wdr/wmake.log 2>&1 || true
+      if ! test -x /opt/wdr/bin/windDrivenRainFoam; then cat /opt/wdr/wmake.log; exit 1; fi
+      if grep -i "warning" /opt/wdr/wmake.log; then echo "solver compiled with warnings"; exit 1; fi
+      wclean >/dev/null; rm -rf /opt/wdr/src/Make/linux64*
+      # Bake the OpenFOAM environment so `apptainer exec img.sif simpleFoam` works without sourcing bashrc.
+      env | grep -E "^(WM_[A-Z_]*|FOAM_[A-Z_]*|MPI_[A-Z_]*|PATH|LD_LIBRARY_PATH)=" \
+        | sed "s/^\([^=]*\)=\(.*\)$/export \1=\"\2\"/" > /.singularity.d/env/90-openfoam.sh
+    '
+    printf 'export PATH="/opt/wdr/bin:$PATH"\nexport LD_LIBRARY_PATH="/opt/wdr/lib:$LD_LIBRARY_PATH"\n' >> /.singularity.d/env/90-openfoam.sh
+    chmod 755 /opt/wdr/bin/wdr-case
+    printf 'solver_rev=%s\ntutorials_rev=%s\n' "{{ SOLVER_REV }}" "{{ TUTORIALS_REV }}" > /opt/wdr/VERSION
+    # smoke test: the binary links and parses its options
+    . /.singularity.d/env/90-openfoam.sh && windDrivenRainFoam -help > /dev/null
+
+%environment
+    export LC_ALL=C.UTF-8
+
+%runscript
+    exec /opt/wdr/bin/wdr-case "$@"
+
+%test
+    . /.singularity.d/env/90-openfoam.sh
+    windDrivenRainFoam -help >/dev/null && simpleFoam -help >/dev/null
+
+%help
+    windDrivenRainFoam (OpenFOAM ESI v2606 port) with the cubicBuilding tutorial.
+      apptainer run wdr.sif help                 # case workflow steps
+      apptainer exec wdr.sif windDrivenRainFoam -parallel
+
+%labels
+    org.opencontainers.image.title windDrivenRainFoam
+    org.opencontainers.image.source https://github.com/OpenFOAM-BuildingPhysics/windDrivenRainFoam
+    org.opencontainers.image.base.name openfoam-v2606 (ubuntu:24.04 by digest)
+    solver.revision {{ SOLVER_REV }}
+    tutorials.revision {{ TUTORIALS_REV }}

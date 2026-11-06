@@ -1,0 +1,23 @@
+# Single source of truth for every pinned input of the image build and the run environment.
+image:
+  base_image: ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852   # ubuntu:24.04 (noble)
+  apt_snapshot: 20261101T000000Z      # https://snapshot.ubuntu.com, frozen archive state
+  apt_packages: deps/apt-packages.txt # exact name=version for every directly installed package
+  openfoam_url: https://dl.openfoam.com/source/v2606/OpenFOAM-v2606.tgz
+  openfoam_sha256: 2a1310e3ed192cc4c521e1d22dcc176f57bec61160c878dc4348f21d6672294d
+  compiler: gcc/g++ 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1 via g++=4:13.2.0-7ubuntu1 from the snapshot)
+  mpi: OpenMPI 4.1.6 (system, WM_MPLIB=SYSTEMOPENMPI) with PMIx 5 (libpmix2t64)
+  thirdparty: none (system scotch/ptscotch 7.0.4, fftw 3.3.10; metis/kahip/cgal/adios2 off)
+solver:
+  repo: https://github.com/OpenFOAM-BuildingPhysics/windDrivenRainFoam
+  base: of-com_v2106 @ 7a38455a591cf5078818ec1a3748433b723f893a
+tutorials:
+  repo: https://github.com/OpenFOAM-BuildingPhysics/windDrivenRainFoam-tutorials
+  ref: of-com_v2106 @ 53e77ca302714e32def2c58fc3d9785e6c28c984
+reference:
+  image: opencfd/openfoam-default@sha256:56be58e72f8bd89a6db7ca37ac4124f64a66db5909b79034176cbc9a0bb1f819  # OpenFOAM v2106
+runtime:
+  apptainer: 1.5.5
+  slurm: 23.11.4 (MpiDefault=pmix)
+tools:
+  syft: 1.18.1 (sha256 066c251652221e4d44fcc4d115ce3df33a91769da38c830a8533199db2f65aab)

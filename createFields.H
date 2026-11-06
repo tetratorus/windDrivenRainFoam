@@ -13,7 +13,7 @@ IOdictionary transportProperties
 );
 dimensionedScalar temp
 (
-    transportProperties.lookupOrDefault<scalar>("temp", 285.85)
+    transportProperties.getOrDefault<scalar>("temp", 285.85)
 );    
 dimensionedScalar rhoa
 (
@@ -35,16 +35,16 @@ dimensionedScalar mua
 );
 scalar scalingFactor
 (
-    transportProperties.lookupOrDefault<scalar>("scalingFactor", 1.0)
+    transportProperties.getOrDefault<scalar>("scalingFactor", 1.0)
 );
-const bool solveTD = transportProperties.lookupOrDefault("solveTD", false);    
+const bool solveTD = transportProperties.getOrDefault<bool>("solveTD", false);    
 List<scalar> Rh
 (
-    transportProperties.lookup("Rh")
+    transportProperties.get<List<scalar>>("Rh")
 );
 List<scalar> phases
 (
-    transportProperties.lookup("phases")
+    transportProperties.get<List<scalar>>("phases")
 );
 
 #include "calculateFhD.H"

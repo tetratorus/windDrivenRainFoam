@@ -1,0 +1,70 @@
+# Stage 1 of 2: OpenFOAM ESI v2606 toolchain, compiled from the pinned source tarball.
+# Every input is pinned: base image by digest, apt by snapshot date, source by sha256.
+# See ../deps/lock.yaml for the single source of truth for these pins.
+Bootstrap: docker
+From: ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+
+%arguments
+    APT_SNAPSHOT=20261101T000000Z
+    APT_MIRROR=https://snapshot.ubuntu.com/ubuntu
+    OPENFOAM_SHA256=2a1310e3ed192cc4c521e1d22dcc176f57bec61160c878dc4348f21d6672294d
+    BUILD_JOBS=8
+
+%files
+    ../deps/apt-packages.txt /opt/build/apt-packages.txt
+    ../deps/sources/OpenFOAM-v2606.tgz /opt/build/OpenFOAM-v2606.tgz
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    rm -f /etc/apt/sources.list.d/ubuntu.sources
+    cat > /etc/apt/sources.list <<SRC
+deb {{ APT_MIRROR }}/{{ APT_SNAPSHOT }} noble main universe
+deb {{ APT_MIRROR }}/{{ APT_SNAPSHOT }} noble-updates main universe
+deb {{ APT_MIRROR }}/{{ APT_SNAPSHOT }} noble-security main universe
+SRC
+    # Base image has no CA bundle. Bootstrap ca-certificates with TLS peer check off;
+    # package integrity is still enforced by apt's GPG-signed Release files.
+    NV="-o Acquire::https::Verify-Peer=false -o Acquire::Check-Valid-Until=false"
+    apt-get $NV update
+    apt-get $NV install -y --no-install-recommends "$(grep '^ca-certificates=' /opt/build/apt-packages.txt)"
+    apt-get -o Acquire::Check-Valid-Until=false update
+    # exact versions come from apt-packages.txt (name=version)
+    xargs -a /opt/build/apt-packages.txt apt-get install -y --no-install-recommends
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+    cd /opt
+    # source archive is fetched once by ../deps/fetch-sources.sh (dl.openfoam.com or an approved mirror)
+    echo "{{ OPENFOAM_SHA256 }}  /opt/build/OpenFOAM-v2606.tgz" | sha256sum -c -
+    tar xzf /opt/build/OpenFOAM-v2606.tgz && rm /opt/build/OpenFOAM-v2606.tgz
+    cd OpenFOAM-v2606
+
+    # No ThirdParty tree: system OpenMPI/Scotch/FFTW from the pinned apt snapshot; optional libs off.
+    printf 'export WM_MPLIB=SYSTEMOPENMPI\n' > etc/prefs.sh
+    printf 'SCOTCH_VERSION=scotch-system\nexport SCOTCH_ARCH_PATH=/usr\n' > etc/config.sh/scotch
+    printf 'fftw_version=fftw-system\nexport FFTW_ARCH_PATH=/usr\n' > etc/config.sh/FFTW
+    printf 'boost_version=boost-none\ncgal_version=cgal-none\n' > etc/config.sh/CGAL
+    printf 'KAHIP_VERSION=kahip-none\n' > etc/config.sh/kahip
+    printf 'METIS_VERSION=metis-none\n' > etc/config.sh/metis
+    printf 'adios2_version=adios2-none\n' > etc/config.sh/adios2
+
+    # etc/bashrc locates itself via BASH_SOURCE, so the build must run under bash (not /bin/sh)
+    WM_NCOMPPROCS={{ BUILD_JOBS }} bash -euc '
+      set +eu; . /opt/OpenFOAM-v2606/etc/bashrc; set -eu
+      ./Allwmake -j -s -q -l > /opt/build/Allwmake.log 2>&1 || { tail -200 /opt/build/Allwmake.log; exit 1; }
+      tail -40 /opt/build/Allwmake.log
+      # keep build products only; drop object files
+      rm -rf build platforms/*/src platforms/*/applications
+      for a in blockMesh simpleFoam decomposePar reconstructPar changeDictionary foamListTimes foamDictionary; do
+        test -x "$FOAM_APPBIN/$a" || { echo "missing $a"; exit 1; }
+      done
+    '
+
+%environment
+    export LC_ALL=C.UTF-8
+    export FOAM_INST_DIR=/opt
+
+%labels
+    org.opencontainers.image.title openfoam-v2606
+    org.opencontainers.image.version v2606
+    org.opencontainers.image.source https://dl.openfoam.com/source/v2606/

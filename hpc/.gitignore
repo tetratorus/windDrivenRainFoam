@@ -1,0 +1,4 @@
+build/
+deps/sources/
+*.sif
+__pycache__/
